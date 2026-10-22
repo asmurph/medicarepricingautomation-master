@@ -704,10 +704,7 @@ function App() {
             className="secondary"
             type="button"
             onClick={() => {
-              setFormState((current) => ({
-                ...defaultFormState,
-                requestedByUserId: current.requestedByUserId,
-              }))
+              setFormState({ ...defaultFormState })
               if (attachmentInputRef.current) {
                 attachmentInputRef.current.value = ''
               }
