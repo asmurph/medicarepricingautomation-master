@@ -1,25 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getContext } from '@microsoft/power-apps/app'
-import { SystemusersService } from '../generated/services/SystemusersService'
-import { Mpa_pricingrequestsService } from '../generated/services/Mpa_pricingrequestsService'
 import {
-  Mpa_pricingrequestsmpa_jurisdiction,
-  Mpa_pricingrequestsmpa_lob,
-  Mpa_pricingrequestsmpa_priority,
-  Mpa_pricingrequestsmpa_requestsource,
-  Mpa_pricingrequestsmpa_requesttype,
-  Mpa_pricingrequestsmpa_subworktype,
-  Mpa_pricingrequestsmpa_worktype,
-  type Mpa_pricingrequestsBase,
-  type Mpa_pricingrequestsmpa_jurisdiction as JurisdictionChoice,
-  type Mpa_pricingrequestsmpa_lob as LobChoice,
-  type Mpa_pricingrequestsmpa_priority as PriorityChoice,
-  type Mpa_pricingrequestsmpa_requestsource as RequestSourceChoice,
-  type Mpa_pricingrequestsmpa_requesttype as RequestTypeChoice,
-  type Mpa_pricingrequestsmpa_subworktype as SubWorkTypeChoice,
-  type Mpa_pricingrequestsmpa_worktype as WorkTypeChoice,
-} from '../generated/models/Mpa_pricingrequestsModel'
-import { toChoice, toOptions } from '../lib/pricingRequestUtils'
+  jurisdictionOptions,
+  lobOptions,
+  priorityOptions,
+  requestSourceOptions,
+  requestTypeOptions,
+  subWorkTypeOptions,
+  workTypeOptions,
+  yesNoOptions,
+} from '../lib/intakeOptions'
+import {
+  loadPricingFromConnector,
+  submitPricingCaseToConnector,
+  type PricingCaseSubmission,
+  type PricingRecord,
+} from '../lib/pricingConnector'
 
 type RoutingCondition = 'novelTechnology' | 'methodologyChange' | 'clinicalJudgement' | null
 
@@ -63,15 +59,16 @@ type FormState = {
   jurisdiction: string
   lob: string
   priority: string
-  requestedByUserId: string
+  requestedBy: string
   clinicalJudgement: string
   novelTechnology: string
   methodologyChange: string
   routingRationale: string
   issueSummary: string
+  relatedPricingId: string
   comparatorCodes: string
   specialInstructions: string
-  supportingDocumentNames: string
+  supportingDocumentNames: string[]
   workPortions: WorkPortion[]
   notifyAssignee: boolean
   returnIncompleteWork: boolean
@@ -97,22 +94,20 @@ const defaultFormState: FormState = {
   jurisdiction: '',
   lob: '',
   priority: '',
-  requestedByUserId: '',
+  requestedBy: '',
   clinicalJudgement: 'No',
   novelTechnology: 'No',
   methodologyChange: 'No',
   routingRationale: '',
   issueSummary: '',
+  relatedPricingId: '',
   comparatorCodes: '',
   specialInstructions: '',
-  supportingDocumentNames: '',
+  supportingDocumentNames: [],
   workPortions: defaultWorkPortions,
   notifyAssignee: true,
   returnIncompleteWork: true,
 }
-
-const guidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function localDateInputValue(): string {
   const now = new Date()
@@ -156,69 +151,57 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
   const [formState, setFormState] = useState<FormState>(defaultFormState)
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false)
   const [currentUserName, setCurrentUserName] = useState<string>('')
+  const [pricingRecords, setPricingRecords] = useState<PricingRecord[]>([])
+  const [pricingError, setPricingError] = useState<string | null>(null)
+  const [pricingLoading, setPricingLoading] = useState<boolean>(true)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
 
-  const requestTypeOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_requesttype), [])
-  const requestSourceOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_requestsource), [])
-  const workTypeOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_worktype), [])
-  const subWorkTypeOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_subworktype), [])
-  const jurisdictionOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_jurisdiction), [])
-  const lobOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_lob), [])
-  const priorityOptions = useMemo(() => toOptions(Mpa_pricingrequestsmpa_priority), [])
-
   useEffect(() => {
-    let cancelled = false
+    let active = true
 
-    const loadCurrentUser = async () => {
+    async function loadCurrentUser() {
       try {
         const { user } = await getContext()
-        let systemUserId = user.systemUserId?.trim() ?? ''
+        const identity = user.fullName || user.userPrincipalName || ''
 
-        const lookups: string[] = []
-        if (user.objectId) {
-          lookups.push(`azureactivedirectoryobjectid eq ${user.objectId}`)
-        }
-        if (user.userPrincipalName) {
-          const upn = user.userPrincipalName.replaceAll("'", "''")
-          lookups.push(`domainname eq '${upn}'`, `internalemailaddress eq '${upn}'`)
-        }
-
-        for (const filter of lookups) {
-          if (systemUserId) {
-            break
-          }
-          const result = await SystemusersService.getAll({
-            select: ['systemuserid'],
-            filter,
-            top: 1,
-          })
-          if (result.success) {
-            systemUserId = result.data[0]?.systemuserid ?? ''
-          } else {
-            console.warn('Systemuser lookup failed', filter, result.error)
-          }
-        }
-
-        if (cancelled || !systemUserId) {
-          if (!systemUserId) {
-            console.warn('Could not resolve current user systemuser id', user)
-          }
+        if (!active || !identity) {
           return
         }
 
-        setCurrentUserName(user.fullName ?? '')
+        setCurrentUserName(user.fullName ?? identity)
         setFormState((current) =>
-          current.requestedByUserId ? current : { ...current, requestedByUserId: systemUserId },
+          current.requestedBy ? current : { ...current, requestedBy: identity },
         )
       } catch (error) {
         console.warn('Unable to load current user', error)
       }
     }
 
+    async function loadPricing() {
+      try {
+        const data = await loadPricingFromConnector()
+
+        if (active) {
+          setPricingRecords(data)
+        }
+      } catch (error) {
+        if (active) {
+          setPricingError(
+            error instanceof Error ? error.message : 'Unable to load pricing records.',
+          )
+        }
+      } finally {
+        if (active) {
+          setPricingLoading(false)
+        }
+      }
+    }
+
     void loadCurrentUser()
+    void loadPricing()
 
     return () => {
-      cancelled = true
+      active = false
     }
   }, [])
 
@@ -231,16 +214,10 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
     setSuccessMessage('')
     setErrorMessage('')
 
-    const requestedById = formState.requestedByUserId.trim()
-    const ownerId = formState.assignedStaffOrTeam.trim() || requestedById
+    const requestedBy = formState.requestedBy.trim()
 
-    if (!guidPattern.test(requestedById)) {
-      setErrorMessage('Requested By User ID must be a valid GUID.')
-      return
-    }
-
-    if (!guidPattern.test(ownerId)) {
-      setErrorMessage('Assigned staff must be a valid system user ID.')
+    if (!requestedBy) {
+      setErrorMessage('Requested by is required.')
       return
     }
 
@@ -252,75 +229,60 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
     setIsSubmitting(true)
 
     try {
-      const payload: Omit<Mpa_pricingrequestsBase, 'mpa_pricingrequestid'> = {
-        mpa_name: formState.caseTitle,
-        mpa_description: formState.issueSummary,
-        mpa_effectivedate: formState.effectiveDate,
-        mpa_jurisdiction: toChoice<JurisdictionChoice>(formState.jurisdiction),
-        mpa_lob: toChoice<LobChoice>(formState.lob),
-        mpa_requestsource: toChoice<RequestSourceChoice>(formState.requestSource),
-        mpa_requesttype: toChoice<RequestTypeChoice>(formState.requestType),
-        mpa_subworktype: toChoice<SubWorkTypeChoice>(formState.subWorkType),
-        mpa_worktype: toChoice<WorkTypeChoice>(formState.workType),
-        mpa_internalnotes: [
-          ['Code status', formState.codeStatus === 'assigned' ? 'Assigned' : 'Code pending'],
-          ['Primary CPT/HCPCS code', formState.primaryCode],
-          ['Code descriptor', formState.codeDescriptor],
-          ['Parenthetical or CPT instruction', formState.codeInstruction],
-          ['Manufacturer or developer', formState.manufacturerDeveloper],
-          ['Technology or product name', formState.technologyProduct],
-          ['Site of service', formState.siteOfService],
-          ['Urgent or time-sensitive', formState.urgent],
-          ['Assigned staff or team', formState.assignedStaffOrTeam],
-          ['Clinical judgment required', formState.clinicalJudgement],
-          ['New or novel technology', formState.novelTechnology],
-          ['Substantive methodology change', formState.methodologyChange],
-          ['Routing determination rationale', formState.routingRationale],
-          ['Known comparator codes', formState.comparatorCodes],
-          ['Special instructions', formState.specialInstructions],
-          ['Supporting document filenames (not uploaded)', formState.supportingDocumentNames],
-          ['Notify assignee when predecessor completes', String(formState.notifyAssignee)],
-          ['Return incomplete work to assigned owner', String(formState.returnIncompleteWork)],
-          ...formState.workPortions.map(
-            (portion) => [
-              `Workflow ${portion.name}`,
-              `Applicability: ${
-                portion.condition === null || formState[portion.condition] === 'Yes'
-                  ? 'Required'
-                  : 'Not required'
-              }; Assigned to: ${portion.assignedTo}; Due: ${portion.due}; Dependency: ${portion.dependency}`,
-            ] as [string, string],
-          ),
-        ]
-          .filter(([, value]) => value.trim())
-          .map(([label, value]) => `${label}: ${value}`)
-          .join('\n'),
-        'mpa_RequestedBy@odata.bind': `/systemusers(${requestedById})`,
-        ownerid: ownerId,
-        owneridtype: 'systemusers',
-        statecode: 0,
-        statuscode: 1,
+      const isYes = (value: string) => value === 'Yes'
+      const submission: PricingCaseSubmission = {
+        caseTitle: formState.caseTitle.trim(),
+        requestType: formState.requestType,
+        workType: formState.workType,
+        subWorkType: formState.subWorkType,
+        priority: formState.priority,
+        requestSource: formState.requestSource,
+        requestedBy,
+        assignedStaffOrTeam: formState.assignedStaffOrTeam.trim() || requestedBy,
+        effectiveDate: formState.effectiveDate,
+        dueDate: formState.dueDate,
+        jurisdiction: formState.jurisdiction,
+        lob: formState.lob,
+        urgent: isYes(formState.urgent),
+        codeStatus: formState.codeStatus === 'assigned' ? 'Assigned' : 'Pending',
+        primaryCode: formState.primaryCode.trim(),
+        codeDescriptor: formState.codeDescriptor,
+        codeInstruction: formState.codeInstruction,
+        manufacturerDeveloper: formState.manufacturerDeveloper,
+        technologyProduct: formState.technologyProduct,
+        siteOfService: formState.siteOfService,
+        clinicalJudgement: isYes(formState.clinicalJudgement),
+        novelTechnology: isYes(formState.novelTechnology),
+        methodologyChange: isYes(formState.methodologyChange),
+        routingRationale: formState.routingRationale,
+        workPortions: formState.workPortions.map((portion) => ({
+          name: portion.name,
+          applicability:
+            portion.condition === null || isYes(formState[portion.condition])
+              ? 'Required'
+              : 'Not required',
+          assignedTo: portion.assignedTo,
+          due: portion.due,
+          dependency: portion.dependency,
+        })),
+        notifyAssignee: formState.notifyAssignee,
+        returnIncompleteWork: formState.returnIncompleteWork,
+        issueSummary: formState.issueSummary,
+        relatedPricingId: formState.relatedPricingId
+          ? Number(formState.relatedPricingId)
+          : undefined,
+        comparatorCodes: formState.comparatorCodes,
+        specialInstructions: formState.specialInstructions,
+        supportingDocumentNames: formState.supportingDocumentNames,
       }
 
-      if (formState.priority) {
-        payload.mpa_priority = toChoice<PriorityChoice>(formState.priority)
-      }
+      await submitPricingCaseToConnector(submission)
 
-      if (formState.dueDate) {
-        payload.mpa_duedate = formState.dueDate
-      }
-
-      const response = await Mpa_pricingrequestsService.create(payload)
-
-      if (!response.success) {
-        throw response.error ?? new Error('Unable to create pricing request.')
-      }
-
-      setSuccessMessage('Pricing request created successfully.')
+      setSuccessMessage('Pricing case created successfully.')
       await onCreated()
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Unable to create pricing request.'
+        error instanceof Error ? error.message : 'Unable to create pricing case.'
       setErrorMessage(message)
       setIsSubmitting(false)
     }
@@ -593,14 +555,13 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
                 required
               />
               <label>
-                <span>Assigned staff system user ID</span>
+                <span>Assigned staff or team</span>
                 <input
                   type="text"
                   value={formState.assignedStaffOrTeam}
                   onChange={(event) => onFieldChange('assignedStaffOrTeam', event.target.value)}
                   placeholder="Leave blank to assign to requester"
                 />
-                <small>Enter a Dataverse system user GUID; teams are not supported by this request form.</small>
               </label>
               <label>
                 <span>Initial status</span>
@@ -610,19 +571,19 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
               <SelectField
                 label="Urgent or time-sensitive"
                 value={formState.urgent}
-                options={[{ value: 'No', label: 'No' }, { value: 'Yes', label: 'Yes' }]}
+                options={yesNoOptions}
                 onChange={(value) => onFieldChange('urgent', value)}
               />
               <label>
                 <span>Requested by<span className="intake-required"> *</span></span>
                 <input
                   type="text"
-                  value={formState.requestedByUserId}
-                  onChange={(event) => onFieldChange('requestedByUserId', event.target.value)}
-                  placeholder={currentUserName || 'Authenticated user ID'}
+                  value={formState.requestedBy}
+                  onChange={(event) => onFieldChange('requestedBy', event.target.value)}
+                  placeholder={currentUserName || 'Requester name or email'}
                   required
                 />
-                <small>{currentUserName ? `Signed in as ${currentUserName}` : 'Enter a valid Dataverse user ID.'}</small>
+                {currentUserName ? <small>Signed in as {currentUserName}</small> : null}
               </label>
             </div>
           </section>
@@ -640,19 +601,19 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
               <SelectField
                 label="Does the case involve clinical judgment?"
                 value={formState.clinicalJudgement}
-                options={[{ value: 'No', label: 'No' }, { value: 'Yes', label: 'Yes' }]}
+                options={yesNoOptions}
                 onChange={(value) => onFieldChange('clinicalJudgement', value)}
               />
               <SelectField
                 label="Is this a new or novel technology?"
                 value={formState.novelTechnology}
-                options={[{ value: 'No', label: 'No' }, { value: 'Yes', label: 'Yes' }]}
+                options={yesNoOptions}
                 onChange={(value) => onFieldChange('novelTechnology', value)}
               />
               <SelectField
                 label="Does the methodology substantively change?"
                 value={formState.methodologyChange}
-                options={[{ value: 'No', label: 'No' }, { value: 'Yes', label: 'Yes' }]}
+                options={yesNoOptions}
                 onChange={(value) => onFieldChange('methodologyChange', value)}
               />
               <label>
@@ -810,11 +771,29 @@ function IntakePage({ onCreated, onBack, setErrorMessage, setSuccessMessage }: I
                   onChange={(event) =>
                     onFieldChange(
                       'supportingDocumentNames',
-                      Array.from(event.target.files ?? []).map((file) => file.name).join(', '),
+                      Array.from(event.target.files ?? []).map((file) => file.name),
                     )
                   }
                 />
-                <small>File contents are not uploaded by the current Dataverse integration. Add files after case creation.</small>
+                <small>Only file names are sent with the case; file contents are not uploaded.</small>
+              </label>
+              <label>
+                <span>Related pricing record</span>
+                <select
+                  value={formState.relatedPricingId}
+                  onChange={(event) => onFieldChange('relatedPricingId', event.target.value)}
+                  disabled={pricingLoading || pricingRecords.length === 0}
+                >
+                  <option value="">
+                    {pricingLoading ? 'Loading pricing...' : 'None'}
+                  </option>
+                  {pricingRecords.map((record) => (
+                    <option key={record.PricingId} value={String(record.PricingId)}>
+                      {record.PricingName}
+                    </option>
+                  ))}
+                </select>
+                {pricingError ? <small>{pricingError}</small> : null}
               </label>
               <label>
                 <span>Special instructions</span>
