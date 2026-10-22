@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "appId": null,
+  "appDisplayName": "Medicare Pricing Automation",
+  "region": "prod",
+  "environmentId": "0d4dbe9f-52de-e7e1-9d15-0f9c29ffbe10",
+  "description": " ",
+  "buildPath": "./dist",
+  "buildEntryPoint": "index.html",
+  "localAppUrl": "http://localhost:3000",
+  "logoPath": "Default",
+  "connectionReferences": {},
+  "databaseReferences": {
+    "default.cds": {
+      "dataSources": {
+        "pricinginquiries": {
+          "entitySetName": "mpa_pricinginquiries",
+          "logicalName": "mpa_pricinginquiry"
+        },
+        "pricingmeetings": {
+          "entitySetName": "mpa_pricingmeetings",
+          "logicalName": "mpa_pricingmeeting"
+        },
+        "pricingrecords": {
+          "entitySetName": "mpa_pricingrecords",
+          "logicalName": "mpa_pricingrecord"
+        },
+        "pricingrequests": {
+          "entitySetName": "mpa_pricingrequests",
+          "logicalName": "mpa_pricingrequest"
+        },
+        "pricingrequestlines": {
+          "entitySetName": "mpa_pricingrequestlines",
+          "logicalName": "mpa_pricingrequestline"
+        },
+        "users": {
+          "entitySetName": "systemusers",
+          "logicalName": "systemuser"
+        }
+      },
+      "environmentVariableName": ""
+    }
+  }
+}
